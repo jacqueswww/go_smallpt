@@ -96,27 +96,20 @@ func clamp(x float64 ) float64 {
 func toInt(x float64) int {
     return int(math.Pow(clamp(x),1/2.2)*255+.5);
 }
-/*
-inline bool intersect(const Ray &r, double &t, int &id){
-  double n=sizeof(spheres)/sizeof(Sphere), d, inf=t=1e20;
-  for(int i=int(n);i--;) if((d=spheres[i].intersect(r))&&d<t){t=d;id=i;}
-  return t<inf;
-}
-*/
 
-func intersect(r ray, t float64, id int) bool {
+func intersect(r *ray, t *float64, id *int) bool {
     n := len(spheres)
     d := 0.0
     inf := 1*math.Exp(20)
-    t = inf
+    *t = inf
     for i := n; i > 0; i-- {
-        d = sphere_intersect(spheres[i], r)
-        if (d > 0) && (d < t) {
-            t = d
-            id = i
+        d = sphere_intersect(spheres[i], *r)
+        if (d > 0) && (d < *t) {
+            *t = d
+            *id = i
         }
     }
-    return t < inf
+    return *t < inf
 }
 
 func main() {
