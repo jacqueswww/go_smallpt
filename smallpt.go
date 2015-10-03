@@ -118,7 +118,7 @@ func intersect(r *ray, t *float64, id *int) bool {
 	d := 0.0
 	inf := 1 * math.Exp(20)
 	*t = inf
-	for i := n; i > 0; i-- {
+	for i := n - 1; i > 0; i-- {
 		d = sphere_intersect(spheres[i], *r)
 		if (d > 0) && (d < *t) {
 			*t = d
@@ -128,7 +128,7 @@ func intersect(r *ray, t *float64, id *int) bool {
 	return *t < inf
 }
 
-func radiance(r ray, depth int, Xi uint32, E int) vector {
+func radiance(r ray, depth int, Xi [3]int) vector {
 	var t float64                // distance to intersection
 	id := 0                      // id of intersected object
 	if !intersect(&r, &t, &id) { // if miss, return black
@@ -142,23 +142,21 @@ func radiance(r ray, depth int, Xi uint32, E int) vector {
 	}
 	x := vector_add(r.o, vector_times(r.d, t)) // ray intersection point
 	n := vector_norm(vector_sub(x, obj.p))     // sphere normal
-	var nl vector
+	nl := vector_times(n, -1)
 	if vector_dot(n, (r.d)) < 0 { // properly oriented surface normal
-		nl := n
-	} else {
-		nl := vector_times(n, -1)
+		nl = n
 	}
 
 	f := obj.c // object color (BRDF modulator)
 	// use maximum reflectivity amount of Russian roulette
 	var p float64
 	if f.x > f.y && f.x > f.z { // max refl
-		p := f.x
+		p = f.x
 	} else {
 		if f.y > f.z {
-			p := f.y
+			p = f.y
 		} else {
-			p := f.z
+			p = f.z
 		}
 	}
 
@@ -167,7 +165,7 @@ func radiance(r ray, depth int, Xi uint32, E int) vector {
 		if erand48() < p {
 			f = vector_times(f, (1 / p))
 		} else {
-			return vector_times(obj.e, float64(E)) //R.R.
+			return obj.e //R.R.
 		}
 	}
 	// ideal diffuse reflection
@@ -188,9 +186,57 @@ func radiance(r ray, depth int, Xi uint32, E int) vector {
 		d := vector_times(u, math.Cos(r1)*r2s)
 		d = vector_add(d, vector_times(v, math.Sin(r1)*r2s))
 		d = vector_add(d, vector_norm(vector_times(w, math.Sqrt(1-r2)))) // d is random reflection ray
+		return vector_add(obj.e, vector_mul(f, (radiance(ray{x, d}, depth, Xi))))
+	} else if obj.refl == SPEC { // Ideal SPECULAR reflection
+		_ray := ray{x, vector_times(vector_times(vector_sub(r.d, n), 2), vector_dot(n, r.d))}
+		return vector_add(obj.e, vector_mul(f, (radiance(_ray, depth, Xi)))) //fix this..
+	}
+	// Ray reflRay(x, r.d-n*2*n.dot(r.d));     // Ideal dielectric REFRACTION
+	reflRay := ray{x, vector_sub(r.d, vector_times(vector_times(n, 2), vector_dot(n, r.d)))} // Ideal dielectric REFRACTION
+	into := vector_dot(n, nl) > 0                                                            // Ray from outside going in?
+	nc := 1.0
+	nt := 1.5
+	nnt := nt / nc
+	if into {
+		nnt = nc / nt
+	}
+	ddn := vector_dot(r.d, nl)
+	cos2t := 1 - nnt*nnt*(1-ddn*ddn)
+	if cos2t < 0 { // Total internal reflection
+		return vector_add(obj.e, vector_mul(f, radiance(reflRay, depth, Xi)))
 	}
 
-	return vector{0, 0, 0}
+	into_mul := -1.0
+	if into {
+		into_mul = 1.0
+	}
+	tdir := vector_norm(vector_sub(vector_times(r.d, nnt), vector_times(vector_times(n, into_mul), (ddn*nnt+math.Sqrt(cos2t)))))
+	a := nt - nc
+	b := nt + nc
+	R0 := a * a / (b * b)
+
+	c := 1 - (vector_dot(tdir, n))
+	if into {
+		c = 1 + ddn
+	}
+	//double Re=R0+(1-R0)*c*c*c*c*c,Tr=1-Re,P=.25+.5*Re,RP=Re/P,TP=Tr/(1-P);
+	Re := R0 + (1-R0)*math.Pow(c, 5)
+	Tr := 1 - Re
+	P := 0.25 + .5*Re
+	RP := Re / P
+	TP := Tr / (1 - P)
+	/* return obj.e + f.mult(depth>2 ? (erand48(Xi)<P ?   // Russian roulette
+	   radiance(reflRay,depth,Xi)*RP:radiance(Ray(x,tdir),depth,Xi)*TP) :
+	*/
+	if depth > 2 {
+		if erand48() < P { // Russian roulette
+			return vector_add(obj.e, vector_times(radiance(reflRay, depth, Xi), RP))
+		} else {
+			return vector_add(obj.e, vector_times(radiance(ray{x, tdir}, depth, Xi), TP))
+		}
+	} else {
+		return vector_add(obj.e, vector_times(vector_add(vector_times(radiance(reflRay, depth, Xi), Re), radiance(ray{x, tdir}, depth, Xi)), Tr))
+	}
 }
 
 func check(e error) {
@@ -204,6 +250,60 @@ func erand48() float64 {
 }
 
 func main() {
+	w := 1024
+	h := 768
+	samps := 100
+
+	cam := ray{vector{50, 52, 295.6}, vector_norm(vector{0, -0.042612, -1})} // cam pos, dir
+	cx := vector{float64(w) * 0.5135 / float64(h), 0, 0}
+	cy := vector_times(vector_norm(vector_mod(cx, cam.d)), 0.5135)
+	c := make([]vector, w*h)
+	for y := 0; y < h; y++ { // Loop over image rows
+		fmt.Printf("\rRendering (%d spp) %5.2f%%", samps*4, 100.*y/(h-1))
+		Xi := [3]int{0, 0, y * y * y}
+		for x := 0; x < w; x++ { // Loop cols
+			i := (h-y-1)*w + x
+			for sy := 0.0; sy < 2.0; sy += 1.0 { // 2x2 subpixel rows
+				for sx := 0.0; sx < 2.0; sx += 1.0 { // 2x2 subpixel cols
+					r := vector{0, 0, 0}
+					for s := 0; s < samps; s++ {
+						r1 := 2 * erand48()
+						dx := 1 - math.Sqrt(2-r1)
+						if r1 < 1 {
+							dx = math.Sqrt(r1) - 1
+						}
+
+						r2 := 2 * erand48()
+						dy := 1 - math.Sqrt(2-r2)
+						if r2 < 1 {
+							dy = math.Sqrt(r2) - 1
+						}
+
+						d := vector_add(cam.d, vector_add(vector_times(cx, (((sx+.5+dx)/2.0+float64(x))/float64(w)-.5)), vector_times(cy, (((float64(sy)+.5+dy)/2.0+float64(y))/float64(h)-.5))))
+
+						r = vector_add(r, vector_times(radiance(ray{vector_add(cam.o, vector_times(d, 140)), vector_norm(d)}, 0, Xi), (1./float64(samps))))
+					} // Camera rays are pushed ^^^^^ forward to start in interior
+					c[i] = vector_times(vector_add(c[i], vector{clamp(r.x), clamp(r.y), clamp(r.z)}), .25)
+				}
+			}
+		}
+	}
+
+	f, err := os.Create("image.ppm")
+	check(err)
+	wfile := bufio.NewWriter(f)
+
+	fmt.Fprintf(wfile, "P3\n%d %d\n%d\n", w, h, 255)
+	for i := 0; i < w*h; i++ {
+		c[i] = vector_times(c[i], 255)
+		fmt.Fprintf(wfile, "%d %d %d ", int(c[i].x), int(c[i].y), int(c[i].z))
+		// fmt.Printf("%f %f %f \n", c[i].x, c[i].y, c[i].z)
+	}
+
+	wfile.Flush()
+}
+
+/*
 	vec1 := vector{-1, -3, -5}
 	vec2 := vector{2, 2, 2}
 	fmt.Println(vector_add(vec1, vec2))
@@ -220,4 +320,4 @@ func main() {
 
 	fmt.Fprintln(w, "This is a test.")
 	w.Flush()
-}
+*/
