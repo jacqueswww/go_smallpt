@@ -5,6 +5,8 @@ import "math"
 import "math/rand"
 import "flag"
 import "strconv"
+import "runtime"
+import "sync"
 
 // import "io/ioutil"
 import "os"
@@ -241,11 +243,23 @@ func erand48() float64 {
 	return rand.Float64()
 }
 
+type job_input struct {
+	x int
+	y int
+}
+
+type job_result struct {
+	radiance vector
+	i int
+}
+
 func main() {
+	var NUM_PROCS = runtime.NumCPU()
+	runtime.GOMAXPROCS(NUM_PROCS)
 	flag.Parse()
 	w := 1024
 	h := 768
-	samps := 2
+	samps := 1
 
 	if flag.NArg() > 0 {
 		samps, _ = strconv.Atoi(flag.Arg(0))
@@ -258,39 +272,80 @@ func main() {
 	cy := vector_times(vector_cross(cx, cam.d), 0.5135)
 	c := make([]vector, w*h)
 
-	var direction, r vector
-	var r1, r2 float64
-	var dx, dy float64
 
-	for y := 0; y < h; y++ { // Loop over image rows
-		fmt.Printf("\rRendering (%d spp) %5.2f",samps*4,100.*float64(y)/(float64(h)-1.0));
-		for x := 0; x < w; x++ { // Loop cols
-			i := (h-y-1)*w + x
-			for sy := 0.0; sy < 2.0; sy += 1.0 { // 2x2 subpixel rows
-				for sx := 0.0; sx < 2.0; sx += 1.0 { // 2x2 subpixel cols
-					r = vector{0, 0, 0}
-					for s := 0; s < samps; s++ {
-						r1, r2 = 2 * erand48(), 2 * erand48()
-						if r1 < 1 {
-							dx = math.Sqrt(r1) - 1
-						} else {
-							dx = 1 - math.Sqrt(2-r1)
-						}
-						if r2 < 1 {
-							dy = math.Sqrt(r2) -1
-						} else {
-							dy = 1 - math.Sqrt(2-r2)
-						}
 
-						direction = vector_add(vector_add(vector_times(cx, ((float64(sx)*.5+dx)/2+float64(x))/float64(w)-.5),
-							vector_times(cy, ((float64(sy)+.5+dy)/2+float64(y))/float64(h)-.5)), cam.d)
-						r = vector_add(r, vector_times(radiance(&ray{vector_add(cam.o, vector_times(direction, 140.0)), vector_norm(direction)}, 0), 1.0/float64(samps)))
-					} // Camera rays are pushed ^^^^^ forward to start in interior
-					c[i] = vector_add(c[i], vector_times(r, 0.25))
-				}
+	jobs := make(chan job_input)
+	result_channel := make(chan job_result)
+
+	var wg sync.WaitGroup
+	wg.Add(NUM_PROCS)
+
+	for i := 0; i < NUM_PROCS*2; i++ {
+		go func() {
+		   		var direction, r vector
+				var r1, r2 float64
+			 	var dx, dy float64
+		        for {
+		            j, more := <-jobs
+		            if more {
+		                //fmt.Printf("job input (%d,%d) \n", j.x, j.y)
+						fmt.Printf("\rRendering (%d spp) %5.2f",samps*4,100.*float64(j.y)/(float64(h)-1.0));
+						for sy := 0.0; sy < 2.0; sy += 1.0 { // 2x2 subpixel rows
+							for sx := 0.0; sx < 2.0; sx += 1.0 { // 2x2 subpixel cols
+								r = vector{0, 0, 0}
+								for s := 0; s < samps; s++ {
+									r1, r2 = 2 * erand48(), 2 * erand48()
+									if r1 < 1 {
+										dx = math.Sqrt(r1) - 1
+									} else {
+										dx = 1 - math.Sqrt(2-r1)
+									}
+									if r2 < 1 {
+										dy = math.Sqrt(r2) -1
+									} else {
+										dy = 1 - math.Sqrt(2-r2)
+									}
+
+									direction = vector_add(vector_add(vector_times(cx, ((float64(sx)*.5+dx)/2+float64(j.x))/float64(w)-.5),
+										vector_times(cy, ((float64(sy)+.5+dy)/2+float64(j.y))/float64(h)-.5)), cam.d)
+									r = vector_add(r, vector_times(radiance(&ray{vector_add(cam.o, vector_times(direction, 140.0)), vector_norm(direction)}, 0), 1.0/float64(samps)))
+								} // Camera rays are pushed ^^^^^ forward to start in interior
+								if r.x != 0 || r.y !=0 || r.z != 0 {
+									res_i := (h-j.y-1)*w+j.x
+									result_channel <- job_result{r, res_i}
+								}
+							}
+						}
+		            } else {
+		                fmt.Println("received all jobs")
+		                defer wg.Done()
+		                return
+		            }
+		        }
+		    }()
+	}
+
+	go func() {
+		for {
+			job_res, more := <-result_channel
+			if more {
+				// fmt.Println(job_res)
+				c[job_res.i] = vector_add(c[job_res.i], vector_times(job_res.radiance, 0.25))
+			} else {
+				fmt.Println("Closing result job result goroutine.")
+				return
 			}
 		}
+	}()
+
+	for y := 0; y < h; y++ { // Loop over image rows
+		for x := 0; x < w; x++ { // Loop cols
+			jobs <- job_input{x, y}
+		}
 	}
+	close(jobs)
+	wg.Wait()
+
 
 	f, err := os.Create("image.ppm")
 	check(err)
